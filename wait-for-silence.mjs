@@ -29,7 +29,6 @@ export function waitForSilence(audioStream, offset, minimum) {
         if (done) {
           return;
         }
-        // TODO: maybe just setting the `d` parameter is sufficient actually?
         if (stderrLine.includes(' silence_start: ')) {
           console.log(stderrLine);
           let time = +stderrLine.split(' silence_start: ')[1];
@@ -37,23 +36,7 @@ export function waitForSilence(audioStream, offset, minimum) {
             console.log('still in intro');
             return;
           }
-          console.log('starting wait to see if we get enough silence');
-          silenceTimeout = setTimeout(finish, minimum - 500); // 0.5s threshold in command
-        } else if (stderrLine.includes(' silence_end: ')) {
-          // it's possible to get here before the timeout if the stream gets backed up and is now catching up
-          let { 1: end, 2: duration } = stderrLine.match(/silence_end: ([0-9.]+) \| silence_duration: ([0-9.]+)/);
-          end = (+end) * 1000;
-          duration = (+duration) * 1000;
-          clearTimeout(silenceTimeout);
-          silenceTimeout = null;
-
-          console.log({ end, duration });
-
-          if (duration > minimum - 500 && end - duration > offset) {
-            finish();
-          } else {
-            console.log(`insufficient silence: ${duration}`);
-          }
+          finish();
         }
       })
       .on('error', function(err, stdout, stderr) {
@@ -74,7 +57,7 @@ export function waitForSilence(audioStream, offset, minimum) {
       .inputOptions('-ar 8000')
       .audioChannels(1)
 
-      .audioFilters('silencedetect=n=-30dB:d=0.2')
+      .audioFilters(`silencedetect=n=-20dB:d=${(minimum / 1000).toFixed(3)}`)
       // .output('-')
       // .outputFormat('null')
       .output(outputStream)

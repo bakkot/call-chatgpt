@@ -31,7 +31,7 @@ app.post('/voice', (request, response) => {
   console.log('got incoming voice');
 
   let twiml = new twilio.twiml.VoiceResponse();
-  twiml.say('Initializing');
+  // twiml.say('Initializing');
   let connect = twiml.connect();
   connect.stream({
     url: `wss://${DOMAIN}/stream`
@@ -46,19 +46,7 @@ app.ws('/stream', function(ws, req) {
 
   console.log('connected');
 
-  let userStream;
-
-  function recreateUserStream() {
-    if (userStream) {
-      userStream.done();
-    }
-    userStream = new UserStream;
-  }
-
-  let id = Date.now();
-
-  let state = 'listening';
-  recreateUserStream();
+  let conversation;
 
   // TODO correctly handle multiple simultaneous streams, I guess?
   // might just work tho
@@ -66,53 +54,28 @@ app.ws('/stream', function(ws, req) {
   ws.on('message', function(msg) {
     msg = JSON.parse(msg);
     if (msg.event === 'start') {
-      streamSid = msg.streamSid;
+      conversation = new Conversation(ws, msg.streamSid);
 
-      // TODO handle multiple messages
-
-      // TODO first send the intro audio
-
-      waitForSilence(userStream, 500, 2500).then(async mp3 => {
-        fs.writeFileSync(`./${id}-user-audio.mp3`, mp3);
-        let text = await getTextForMp3Bytes(mp3);
-        console.log({ text });
-
-        let systemPrompt = `You are a helpful, efficient assistant. Your responses are consise and to-the-point while still retaining some life. You will be connected by phone to a user. If any part of the input is unclear, it's probably a transcription error; figure out what they meant and respond to that.`;
-        let messages = [
-          { role: 'system', content: systemPrompt },
-          // { role: 'user', content: 'You will be connected by phone to a user. Explain to them in a few words that they can interact with you by speaking, that your responses may be inaccurate, and that you are not connected to the internet.' },
-          { role: 'user', content: text },
-        ];
-
-        let i = 0;
-        for await (let para of rechunk(chatStream(messages))) {
-          console.log(para);
-          console.log('------');
-
-          let mp3Stream = await getMp3StreamForText(para);
-          // TODO save audio files also
-          // let target = `tts-output-${i++}.mp3`;
-          // let outStream = fs.createWriteStream(target);
-
-          await sendMp3StreamToCall(ws, streamSid, mp3Stream);
-          console.log('finished sending');
-
-          // TODO mark, re-start userstream
-        }
-      });
-
+      conversation.init();
     } else if (msg.event === 'stop') {
-      userStream.done();
-      userStream = null;
-      streamSid = null;
+      conversation.userStream?.done();
+      conversation = null;
     } else if (msg.event === 'media') {
-      if (msg.media.track === 'outbound') {
+      if (conversation.state === 'listening') {
+        conversation.userStream.add(Buffer.from(msg.media.payload, 'base64'));
+      }
+      return;
+    } else if (msg.event === 'mark') {
+      if (msg.mark.name === 'finished-talking') {
+        if (conversation.state !== 'speaking') {
+          console.error(`ERROR: got finished-talking message while in state ${conversation.state}`);
+          return;
+        }
+        console.log('finished sending audio');
+
+        conversation.listen();
         return;
       }
-
-      userStream.add(Buffer.from(msg.media.payload, 'base64'));
-
-      return;
     }
     console.log(msg);
   });
@@ -136,7 +99,7 @@ async function getMp3StreamForText(input) {
     model: 'tts-1',
     input,
     voice: 'fable',
-    speed: 1,
+    speed: 1.25,
   });
   return res.body;
 }
@@ -151,6 +114,107 @@ async function sendMp3StreamToCall(ws, streamSid, mp3Stream) {
       },
     };
     ws.send(JSON.stringify(media));
+  }
+}
+
+
+let systemPrompt = `You are a helpful, efficient assistant. Your responses are consise and to-the-point while still retaining some life. You will be connected by phone to a user. If any part of the input is unclear, it's probably a transcription error; figure out what they meant and respond to that.`;
+
+class Conversation {
+  state = '';
+  ws;
+  streamSid;
+  userStream;
+  id = Date.now();
+  segments = 0;
+  messages = [{ role: 'system', content: systemPrompt }];
+
+  constructor(ws, streamSid) {
+    this.ws = ws;
+    this.streamSid = streamSid;
+  }
+
+  async init() {
+    this.state = 'speaking';
+
+    console.log('introducing...');
+    let toSend = [
+      ...this.messages,
+      {
+        role: 'user',
+        content: 'You will be connected by phone to a user. Explain to them in a few words that they can interact with you by speaking, that your responses may be inaccurate, and that you are not connected to the internet.'
+      },
+    ];
+
+    for await (let para of rechunk(chatStream(toSend))) {
+      console.log(para);
+      console.log('------');
+
+      let mp3Stream = await getMp3StreamForText(para);
+      // TODO save audio files also
+      // let target = `tts-output-${i++}.mp3`;
+      // let outStream = fs.createWriteStream(target);
+
+      await sendMp3StreamToCall(this.ws, this.streamSid, mp3Stream);
+      console.log('finished sending');
+    }
+
+    this.ws.send(JSON.stringify({
+      event: 'mark',
+      streamSid: this.streamSid,
+      mark: {
+        name: 'finished-talking',
+      },
+    }));
+  }
+
+  listen() {
+    console.log('listening...');
+    this.state = 'listening';
+
+    this.userStream = new UserStream;
+
+    waitForSilence(this.userStream, 500, 2500).then(async mp3 => {
+      this.state = 'speaking';
+      console.log('speaking...');
+
+      fs.writeFileSync(`./${this.id}-user-audio-${this.segments++}.mp3`, mp3);
+      let text = await getTextForMp3Bytes(mp3);
+      console.log({ text });
+
+      this.messages.push({
+        role: 'user',
+        content: text,
+      });
+
+      // let i = 0;
+      let botMessage = '';
+      for await (let para of rechunk(chatStream(this.messages))) {
+        console.log(para);
+        botMessage += para + '\n\n';
+        console.log('------');
+
+        let mp3Stream = await getMp3StreamForText(para);
+        // TODO save audio files also
+        // let target = `tts-output-${i++}.mp3`;
+        // let outStream = fs.createWriteStream(target);
+
+        await sendMp3StreamToCall(this.ws, this.streamSid, mp3Stream);
+        console.log('finished sending');
+      }
+      this.messages.push({
+        role: 'assistant',
+        content: botMessage.trim(),
+      });
+
+      this.ws.send(JSON.stringify({
+        event: 'mark',
+        streamSid: this.streamSid,
+        mark: {
+          name: 'finished-talking',
+        },
+      }));
+    });
   }
 }
 
