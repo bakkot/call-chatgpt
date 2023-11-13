@@ -1,0 +1,13 @@
+{
+  "dependencies": {
+    "express": "^4.18.2",
+    "express-ws": "^5.0.2",
+    "fluent-ffmpeg": "^2.1.2",
+    "mpg123-decoder": "^0.4.10",
+    "openai": "^4.17.4",
+    "twilio": "^4.19.0",
+    "wave-resampler": "^1.0.0",
+    "wavefile": "^11.0.0",
+    "ws": "^8.14.2"
+  }
+}
